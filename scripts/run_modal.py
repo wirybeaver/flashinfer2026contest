@@ -11,6 +11,7 @@ Setup (one-time):
 """
 
 import sys
+import os
 from pathlib import Path
 
 # Add project root to path for imports
@@ -23,21 +24,43 @@ from flashinfer_bench import Benchmark, BenchmarkConfig, Solution, TraceSet
 app = modal.App("flashinfer-bench")
 
 trace_volume = modal.Volume.from_name("flashinfer-trace", create_if_missing=True)
-TRACE_SET_PATH = "/data"
+TRACE_SET_PATH = "/data/mlsys26-contest"
 
 image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install("flashinfer-bench", "torch", "triton", "numpy")
+    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
+    .uv_pip_install(
+        "https://github.com/flashinfer-ai/flashinfer-bench/archive/refs/heads/main.zip",
+        "torch",
+        "triton",
+        "numpy",
+    )
 )
 
 
-@app.function(image=image, gpu="B200:1", timeout=3600, volumes={TRACE_SET_PATH: trace_volume})
+@app.function(image=image, gpu="B200:1", timeout=3600, volumes={"/data": trace_volume})
 def run_benchmark(solution: Solution, config: BenchmarkConfig = None) -> dict:
     """Run benchmark on Modal B200 and return results."""
     if config is None:
         config = BenchmarkConfig(warmup_runs=3, iterations=100, num_trials=5)
 
-    trace_set = TraceSet.from_path(TRACE_SET_PATH)
+    # The starter pack script may leave destination_passing_style at default=True.
+    # Triton entrypoints in this repo return tensors, so enforce return-style here.
+    language = getattr(solution.spec.language, "value", str(solution.spec.language))
+    if language == "triton" and solution.spec.destination_passing_style:
+        solution = solution.model_copy(
+            update={
+                "spec": solution.spec.model_copy(update={"destination_passing_style": False}),
+            }
+        )
+
+    trace_set_path = TRACE_SET_PATH
+    # Support accidental double-nesting when volume upload path includes dataset root.
+    if not os.path.isdir(os.path.join(trace_set_path, "definitions")):
+        nested = os.path.join(trace_set_path, "mlsys26-contest")
+        if os.path.isdir(os.path.join(nested, "definitions")):
+            trace_set_path = nested
+
+    trace_set = TraceSet.from_path(trace_set_path)
 
     if solution.definition not in trace_set.definitions:
         raise ValueError(f"Definition '{solution.definition}' not found in trace set")
@@ -68,6 +91,8 @@ def run_benchmark(solution: Solution, config: BenchmarkConfig = None) -> dict:
                 "status": trace.evaluation.status.value,
                 "solution": trace.solution,
             }
+            if trace.evaluation.log:
+                entry["log"] = trace.evaluation.log
             if trace.evaluation.performance:
                 entry["latency_ms"] = trace.evaluation.performance.latency_ms
                 entry["reference_latency_ms"] = trace.evaluation.performance.reference_latency_ms
@@ -100,6 +125,10 @@ def print_results(results: dict):
                 print(f" | abs_err={abs_err:.2e}, rel_err={rel_err:.2e}", end="")
 
             print()
+            if status != "PASSED" and result.get("log"):
+                log_excerpt = result["log"].strip().splitlines()[-1]
+                if log_excerpt:
+                    print(f"    log: {log_excerpt}")
 
 
 @app.local_entrypoint()

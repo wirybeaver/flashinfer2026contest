@@ -1,0 +1,22 @@
+{
+  "name": "eigenvalue-moe-v1",
+  "definition": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+  "author": "eigenvalue/xuanyili",
+  "spec": {
+    "language": "triton",
+    "target_hardware": [
+      "cuda"
+    ],
+    "entry_point": "kernel.py::kernel",
+    "dependencies": [],
+    "destination_passing_style": false,
+    "binding": null
+  },
+  "sources": [
+    {
+      "path": "kernel.py",
+      "content": "\"\"\"\nTrack A (fused_moe) Triton-path implementation.\n\nFor the contest starter-kit, this entrypoint is packaged and executed by\nFlashInfer-Bench. We use FlashInfer's optimized FP8 block-scale MoE API as a\ncorrectness-first baseline, while keeping strict input validation to catch\nmismatches early during local benchmarking.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport torch\nfrom flashinfer.fused_moe import trtllm_fp8_block_scale_moe\n\n\ndef _ensure_shape(tensor: torch.Tensor, expected: tuple[int, ...], name: str) -> None:\n    if tuple(tensor.shape) != expected:\n        raise ValueError(f\"{name} shape mismatch, expected {expected}, got {tuple(tensor.shape)}\")\n\n\ndef kernel(\n    routing_logits: torch.Tensor,\n    routing_bias: torch.Tensor,\n    hidden_states: torch.Tensor,\n    hidden_states_scale: torch.Tensor,\n    gemm1_weights: torch.Tensor,\n    gemm1_weights_scale: torch.Tensor,\n    gemm2_weights: torch.Tensor,\n    gemm2_weights_scale: torch.Tensor,\n    local_expert_offset: int,\n    routed_scaling_factor: float,\n) -> torch.Tensor:\n    \"\"\"\n    Track A entrypoint:\n      moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\n    \"\"\"\n    # Fixed geometry/constants from definition.\n    hidden_size = 7168\n    intermediate_size = 2048\n    num_experts = 256\n    top_k = 8\n    n_group = 8\n    topk_group = 4\n    block_size = 128\n    local_num_experts = 32\n\n    seq_len = int(routing_logits.shape[0])\n    _ensure_shape(routing_logits, (seq_len, num_experts), \"routing_logits\")\n    _ensure_shape(routing_bias, (num_experts,), \"routing_bias\")\n    _ensure_shape(hidden_states, (seq_len, hidden_size), \"hidden_states\")\n    _ensure_shape(hidden_states_scale, (hidden_size // block_size, seq_len), \"hidden_states_scale\")\n    _ensure_shape(gemm1_weights, (local_num_experts, 2 * intermediate_size, hidden_size), \"gemm1_weights\")\n    _ensure_shape(\n        gemm1_weights_scale,\n        (local_num_experts, (2 * intermediate_size) // block_size, hidden_size // block_size),\n        \"gemm1_weights_scale\",\n    )\n    _ensure_shape(gemm2_weights, (local_num_experts, hidden_size, intermediate_size), \"gemm2_weights\")\n    _ensure_shape(\n        gemm2_weights_scale,\n        (local_num_experts, hidden_size // block_size, intermediate_size // block_size),\n        \"gemm2_weights_scale\",\n    )\n\n    if seq_len > 8192:\n        # Explicitly configure a higher tuning range for long traces.\n        tune_max_num_tokens = 16384\n    else:\n        tune_max_num_tokens = 8192\n\n    output = trtllm_fp8_block_scale_moe(\n        routing_logits=routing_logits,\n        routing_bias=routing_bias,\n        hidden_states=hidden_states,\n        hidden_states_scale=hidden_states_scale,\n        gemm1_weights=gemm1_weights,\n        gemm1_weights_scale=gemm1_weights_scale,\n        gemm2_weights=gemm2_weights,\n        gemm2_weights_scale=gemm2_weights_scale,\n        num_experts=num_experts,\n        top_k=top_k,\n        n_group=n_group,\n        topk_group=topk_group,\n        intermediate_size=intermediate_size,\n        local_expert_offset=int(local_expert_offset),\n        local_num_experts=local_num_experts,\n        routed_scaling_factor=float(routed_scaling_factor),\n        routing_method_type=0,  # DeepSeek no-aux topk routing.\n        tune_max_num_tokens=tune_max_num_tokens,\n    )\n\n    return output.to(torch.bfloat16)\n"
+    }
+  ],
+  "description": ""
+}
