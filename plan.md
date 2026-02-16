@@ -1,51 +1,66 @@
-# Plan: Complete Track A FP8 MoE (Triton first, then CUDA)
+# Plan: Track A FP8 MoE (Own Triton First, Then CUDA)
 
-## To-Do List (Reset)
+## Current Goal
 
-- [ ] Confirm `uv` env is active and set `FIB_DATASET_PATH=/workspace/mlsys26-contest`; verify local benchmark can load definition/workloads.
-- [ ] Implement Track A-compatible `kernel(...)` in `solution/triton/kernel.py` using correctness-first FP8 MoE API path with strict input validation.
-- [ ] Run `pack_solution.py` and `run_local.py` for Triton mode, fix interface/runtime issues, and capture baseline correctness/latency.
-- [ ] Iterate Triton-path optimizations only where benchmark indicates meaningful wins while preserving correctness.
-- [ ] Implement matching CUDA binding and kernel in `solution/cuda/binding.py` and `solution/cuda/kernel.cu` with same semantics/signature as Triton path.
-- [ ] Run local benchmark in CUDA mode, fix issues, and optimize launch/memory behavior on RTX 4090.
-- [ ] Compare Triton vs CUDA results, preserve both implementations, and prepare `solution.json` for chosen submission path.
+Finish Track A in this order:
+1. Triton own implementation and B200 tuning
+2. CUDA implementation and B200 tuning
 
-## Scope and Constraints
+The local machine (RTX 4090) is for correctness checks. Modal B200 is the source of truth for performance.
 
-- Target kernel: `moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048`.
-- Work in your existing `uv` environment (`source ~/fi-bench/bin/activate`), no package installs.
-- Use local dataset at `/workspace/mlsys26-contest` and set `FIB_DATASET_PATH` accordingly for runs.
+## Constraints
 
-## Phase 1: Triton Path (Correctness Baseline First)
+- Keep contest scripts (`scripts/run_local.py`, `scripts/run_modal.py`) mostly unchanged.
+- Keep implementation logic in `solution/*`.
+- Avoid relying on hidden/internal FlashInfer fused-kernel shortcut as the final solution path.
+- Use `uv` env (`source ~/fi-bench/bin/activate`) and no extra package installs.
 
-1. Replace template in `/workspace/flashinfer2026contest/solution/triton/kernel.py` with a Python entry function `kernel(...)` that matches the definition inputs exactly and returns the required `bfloat16` output.
-2. Implement baseline logic by calling FlashInfer FP8 MoE API when available (same semantics as definition reference), with explicit shape/dtype checks and deterministic handling of scalar args (`local_expert_offset`, `routed_scaling_factor`).
-3. Add lightweight fast-path/guard code to avoid accidental slow Python fallback on large `seq_len`.
-4. Run local pack + benchmark loop and fix signature/runtime mismatches until all workloads complete with correctness status.
+## Progress Snapshot
 
-## Phase 2: Triton Performance Iteration
+- [x] Triton entrypoint implemented in `solution/triton/kernel.py` with Track A DPS signature.
+- [x] `_ensure_shape` retained as commented reference for shape relationships.
+- [x] One-off local verifier added (`scripts/verify_small_local.py`, git-excluded) to bypass full local harness OOM.
+- [x] Local correctness verified on representative workloads:
+  - `seq_len=7`, `32`, `901`, `11948`, `14107` (all pass, zero error).
+- [ ] Modal B200 Triton benchmark pass with stable end-to-end timing output.
+- [ ] Triton optimization loop based on B200 measurements.
+- [ ] CUDA implementation and verification.
 
-1. Profile current Triton-path baseline latency distribution on 4090 (small and large `seq_len` cases).
-2. If baseline is too slow, incrementally move hot portions into Triton kernels (routing/topk or fused math pieces), while preserving exact output semantics.
-3. Re-run local benchmark after each optimization; keep only changes that improve speed without correctness regressions.
+## Phase 1: Triton (Current)
 
-## Phase 3: CUDA Path Implementation
+1. Keep refining `solution/triton/kernel.py`:
+   - DeepSeek no-aux routing (`top_k=8`, `n_group=8`, `topk_group=4`)
+   - FP8 block-scale dequant
+   - GEMM1 + SwiGLU + GEMM2 + weighted accumulation
+2. Verify correctness locally with the tiny one-off verifier when full `run_local.py` is memory-blocked on 4090.
+3. Run `modal run scripts/run_modal.py` for B200 data; debug timeout/runtime issues with minimal script disturbance.
 
-1. Implement matching entry in `/workspace/flashinfer2026contest/solution/cuda/binding.py` with the identical argument contract as Triton path.
-2. Implement `/workspace/flashinfer2026contest/solution/cuda/kernel.cu` for the same FP8 block-scale MoE semantics (routing + grouped GEMMs + accumulation), starting with correctness-first decomposition.
-3. Wire launch configuration and pointer handling in binding, then validate local benchmark correctness first.
-4. Optimize CUDA kernel launch parameters and memory movement for 4090; re-benchmark and compare against Triton path.
+## Phase 2: Triton B200 Optimization
+
+1. Profile workload classes by `seq_len` on B200 (tiny/medium/long).
+2. Improve kernel path where measurements show gains:
+   - memory traffic/coalescing
+   - routing + accumulation overhead
+   - launch/sync overhead
+3. Keep only changes that preserve correctness.
+
+## Phase 3: CUDA
+
+1. Implement `solution/cuda/binding.py` and `solution/cuda/kernel.cu`.
+2. Keep semantics/signature identical to Triton implementation.
+3. Verify locally first, then optimize on Modal B200.
 
 ## Validation and Delivery
 
-- Keep `config.toml` switched per run (`language = "triton"` then `"cuda"`) and produce validated `solution.json` for each path.
-- Report per-workload status, correctness errors, and speedups from `scripts/run_local.py`.
-- Leave both implementations in repo so you can iterate/submit either path quickly.
+- Keep both Triton and CUDA paths in repo.
+- Compare B200 results and choose best submission path.
+- Generate final `solution.json` from the chosen implementation.
 
-## Key References
+## References
 
 - Track A kernel page: https://bench.flashinfer.ai/kernels/moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048
-- Dataset and local setup: https://huggingface.co/datasets/flashinfer-ai/mlsys26-contest
-- FP8 MoE API reference: https://docs.flashinfer.ai/api/fused_moe.html
-- `trtllm_fp8_block_scale_moe` docs: https://docs.flashinfer.ai/generated/flashinfer.fused_moe.trtllm_fp8_block_scale_moe.html
+- Dataset/setup: https://huggingface.co/datasets/flashinfer-ai/mlsys26-contest
+- FP8 MoE API docs: https://docs.flashinfer.ai/api/fused_moe.html
+- `trtllm_fp8_block_scale_moe`: https://docs.flashinfer.ai/generated/flashinfer.fused_moe.trtllm_fp8_block_scale_moe.html
 - BYOK workflow: https://flashinfer-bench.mintlify.app/docs/tutorials/bring_your_own_kernel
+- B200 architecture/tuning mindset reference: https://zcnrex.github.io/2025/12/23/nvfp4-gemm.html
