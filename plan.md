@@ -1,59 +1,59 @@
-# Plan: Track A FP8 MoE (Own Triton First, Then CUDA)
+# Plan: Track A FP8 MoE (Triton Done, CUDA Parity First)
 
 ## Current Goal
 
 Finish Track A in this order:
-1. Triton own implementation and B200 tuning
-2. CUDA implementation and B200 tuning
+1. Lock CUDA numerical parity on local 4090.
+2. Move CUDA optimization loop to Modal B200.
 
-The local machine (RTX 4090) is for correctness checks. Modal B200 is the source of truth for performance.
+Local 4090 is for correctness/parity. Modal B200 is the source of truth for performance.
 
 ## Constraints
 
 - Keep contest scripts (`scripts/run_local.py`, `scripts/run_modal.py`) mostly unchanged.
 - Keep implementation logic in `solution/*`.
-- Avoid relying on hidden/internal FlashInfer fused-kernel shortcut as the final solution path.
-- Use `uv` env (`source ~/fi-bench/bin/activate`) and no extra package installs.
+- Keep CUDA path in TVM-FFI style (`kernel.cu::kernel`, DPS signature).
+- Use `source ~/fi-bench/bin/activate`; no extra package installs.
 
 ## Progress Snapshot
 
-- [x] Triton entrypoint implemented in `solution/triton/kernel.py` with Track A DPS signature.
-- [x] `_ensure_shape` retained as commented reference for shape relationships.
-- [x] One-off local verifier added (`scripts/verify_small_local.py`, git-excluded) to bypass full local harness OOM.
-- [x] Local correctness verified on representative workloads:
-  - `seq_len=7`, `32`, `901`, `11948`, `14107` (all pass, zero error).
-- [ ] Modal B200 Triton benchmark pass with stable end-to-end timing output.
-- [ ] Triton optimization loop based on B200 measurements.
-- [ ] CUDA implementation and verification.
+- [x] Triton entrypoint implemented in `solution/triton/kernel.py`.
+- [x] Triton local checks completed previously.
+- [x] CUDA path switched to TVM-FFI entry (`config.toml`: `language="cuda"`, `entry_point="kernel.cu::kernel"`).
+- [x] CUDA baseline implemented in `solution/cuda/kernel.cu`:
+  - device-side DeepSeek routing
+  - FP8 block-scale dequant
+  - GEMM1 + SwiGLU + GEMM2 + weighted accumulation
+- [x] CUDA local targeted checks pass status for `seq_len=32/901/11948/14107`.
+- [ ] CUDA parity still not ideal (long-seq error remains elevated).
+- [ ] CUDA B200 performance tuning not started.
 
-## Phase 1: Triton (Current)
+## Current CUDA Parity Notes
 
-1. Keep refining `solution/triton/kernel.py`:
-   - DeepSeek no-aux routing (`top_k=8`, `n_group=8`, `topk_group=4`)
-   - FP8 block-scale dequant
-   - GEMM1 + SwiGLU + GEMM2 + weighted accumulation
-2. Verify correctness locally with the tiny one-off verifier when full `run_local.py` is memory-blocked on 4090.
-3. Run `modal run scripts/run_modal.py` for B200 data; debug timeout/runtime issues with minimal script disturbance.
+- Routing parity is close to reference after:
+  - native FP8 conversion (`__nv_fp8_e4m3`)
+  - device-side grouped top-k routing
+  - deterministic tie handling.
+- Main remaining mismatch is likely in dequant/GEMM numerical path (not routing control flow).
 
-## Phase 2: Triton B200 Optimization
+## Next Actions (Priority Ordered)
 
-1. Profile workload classes by `seq_len` on B200 (tiny/medium/long).
-2. Improve kernel path where measurements show gains:
-   - memory traffic/coalescing
-   - routing + accumulation overhead
-   - launch/sync overhead
-3. Keep only changes that preserve correctness.
-
-## Phase 3: CUDA
-
-1. Implement `solution/cuda/binding.py` and `solution/cuda/kernel.cu`.
-2. Keep semantics/signature identical to Triton implementation.
-3. Verify locally first, then optimize on Modal B200.
+1. **Parity stabilization**
+   - Keep current routing path fixed.
+   - Improve GEMM/dequant numerical alignment (avoid changes that regress long-seq stability).
+2. **Introduce library-backed GEMM trial**
+   - Replace one naive GEMM stage with a library path for parity A/B testing.
+   - Keep routing and tensor plumbing unchanged to isolate effect.
+3. **Regression protocol**
+   - Validate on `seq_len=32, 901, 11948, 14107` after each significant change.
+   - Record abs/rel error and keep only non-regressing changes.
+4. **Then performance**
+   - After parity lock, begin B200 throughput tuning.
 
 ## Validation and Delivery
 
 - Keep both Triton and CUDA paths in repo.
-- Compare B200 results and choose best submission path.
+- Compare CUDA/Triton B200 outcomes and choose submission path.
 - Generate final `solution.json` from the chosen implementation.
 
 ## References
@@ -63,4 +63,4 @@ The local machine (RTX 4090) is for correctness checks. Modal B200 is the source
 - FP8 MoE API docs: https://docs.flashinfer.ai/api/fused_moe.html
 - `trtllm_fp8_block_scale_moe`: https://docs.flashinfer.ai/generated/flashinfer.fused_moe.trtllm_fp8_block_scale_moe.html
 - BYOK workflow: https://flashinfer-bench.mintlify.app/docs/tutorials/bring_your_own_kernel
-- B200 architecture/tuning mindset reference: https://zcnrex.github.io/2025/12/23/nvfp4-gemm.html
+- Starter-kit update (DPS/binding notes): https://github.com/flashinfer-ai/flashinfer-bench-starter-kit/commit/ef5b51a4b8ae6407397ba5e8e5e6a0f2f65430fe
